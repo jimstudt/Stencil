@@ -67,46 +67,11 @@ public struct Variable: Equatable, Resolvable {
 
     var current: Any? = context
     for bit in try lookup(context) {
-      current = resolve(bit: bit, context: current)
-
-      if let context = current as? Context {
-        current = context[bit]
-      } else if let dictionary = current as? [String: Any] {
-        if bit == "count" {
-          current = dictionary.count
-        } else {
-          current = dictionary[bit]
-        }
-      } else if let array = current as? [Any] {
-        if let index = Int(bit) {
-          if index >= 0 && index < array.count {
-            current = array[index]
-          } else {
-            current = nil
-
-        } else if bit == "first" {
-          current = array.first
-        } else if bit == "last" {
-          current = array.last
-        } else if bit == "count" {
-          current = array.count
-        }
-      } else if let keyed = current as? RenderKeyed {
-        current = keyed.value(forRenderKey: bit)
-      } else if let object = current as? NSObject {  // NSKeyValueCoding
-#if os(Linux)
-        return nil
-#else
-        current = object.value(forKey: bit)
-#endif
-      } else if let value = current {
-        current = Mirror(reflecting: value).getValue(for: bit)
+        current = resolve(bit: bit, context: current)
+        
         if current == nil {
-          return nil
+            return nil
         }
-      } else {
-        return nil
-      }
     }
 
     if let resolvable = current as? Resolvable {
@@ -136,6 +101,8 @@ public struct Variable: Equatable, Resolvable {
       return resolve(bit: bit, collection: array)
     } else if let string = context as? String {
       return resolve(bit: bit, collection: string)
+    } else if let keyed = context as? RenderKeyed {
+        return keyed.value(forRenderKey: bit)
     } else if let object = context as? NSObject {  // NSKeyValueCoding
       #if os(Linux)
         return nil
