@@ -1,28 +1,38 @@
 import Foundation
 
-class ForNode : NodeType {
+class ForNode: NodeType {
   let resolvable: Resolvable
   let loopVariables: [String]
-  let nodes:[NodeType]
+  let nodes: [NodeType]
   let emptyNodes: [NodeType]
   let `where`: Expression?
+  let token: Token?
 
-  class func parse(_ parser:TokenParser, token:Token) throws -> NodeType {
-    let components = token.components()
+  class func parse(_ parser: TokenParser, token: Token) throws -> NodeType {
+    let components = token.components
 
-    guard components.count >= 3 && components[2] == "in" &&
-        (components.count == 4 || (components.count >= 6 && components[4] == "where")) else {
-      throw TemplateSyntaxError("'for' statements should use the following 'for x in y where condition' `\(token.contents)`.")
+    func hasToken(_ token: String, at index: Int) -> Bool {
+      return components.count > (index + 1) && components[index] == token
     }
 
-    let loopVariables = components[1].characters
+    func endsOrHasToken(_ token: String, at index: Int) -> Bool {
+      return components.count == index || hasToken(token, at: index)
+    }
+
+    guard hasToken("in", at: 2) && endsOrHasToken("where", at: 4) else {
+      throw TemplateSyntaxError("'for' statements should use the syntax: `for <x> in <y> [where <condition>]`.")
+    }
+
+    let loopVariables = components[1]
       .split(separator: ",")
       .map(String.init)
-      .map { $0.trimmingCharacters(in: CharacterSet.whitespaces) }
+      .map { $0.trim(character: " ") }
 
-    let variable = components[3]
+    let resolvable = try parser.compileResolvable(components[3], containedIn: token)
 
-    var emptyNodes = [NodeType]()
+    let `where` = hasToken("where", at: 4)
+      ? try parser.compileExpression(components: Array(components.suffix(from: 5)), token: token)
+      : nil
 
     let forNodes = try parser.parse(until(["endfor", "empty"]))
 
@@ -30,33 +40,80 @@ class ForNode : NodeType {
       throw TemplateSyntaxError("`endfor` was not found.")
     }
 
+    var emptyNodes = [NodeType]()
     if token.contents == "empty" {
       emptyNodes = try parser.parse(until(["endfor"]))
       _ = parser.nextToken()
     }
 
-    let filter = try parser.compileFilter(variable)
-    let `where`: Expression?
-    if components.count >= 6 {
-      `where` = try parseExpression(components: Array(components.suffix(from: 5)), tokenParser: parser)
-    } else {
-      `where` = nil
-    }
-    return ForNode(resolvable: filter, loopVariables: loopVariables, nodes: forNodes, emptyNodes:emptyNodes, where: `where`)
+    return ForNode(
+      resolvable: resolvable,
+      loopVariables: loopVariables,
+      nodes: forNodes,
+      emptyNodes: emptyNodes,
+      where: `where`,
+      token: token
+    )
   }
 
-  init(resolvable: Resolvable, loopVariables: [String], nodes:[NodeType], emptyNodes:[NodeType], where: Expression? = nil) {
+  init(
+    resolvable: Resolvable,
+    loopVariables: [String],
+    nodes: [NodeType],
+    emptyNodes: [NodeType],
+    where: Expression? = nil,
+    token: Token? = nil
+  ) {
     self.resolvable = resolvable
     self.loopVariables = loopVariables
     self.nodes = nodes
     self.emptyNodes = emptyNodes
     self.where = `where`
+    self.token = token
   }
 
-  func push<Result>(value: Any, context: Context, closure: () throws -> (Result)) throws -> Result {
+  func render(_ context: Context) throws -> String {
+    var values = try resolve(context)
+
+    if let `where` = self.where {
+      values = try values.filter { item -> Bool in
+        try push(value: item, context: context) {
+          try `where`.evaluate(context: context)
+        }
+      }
+    }
+
+    if !values.isEmpty {
+      let count = values.count
+
+      return try zip(0..., values)
+        .map { index, item in
+          let forContext: [String: Any] = [
+            "first": index == 0,
+            "last": index == (count - 1),
+            "counter": index + 1,
+            "counter0": index,
+            "length": count
+          ]
+
+          return try context.push(dictionary: ["forloop": forContext]) {
+            try push(value: item, context: context) {
+              try renderNodes(nodes, context)
+            }
+          }
+        }
+        .joined()
+    }
+
+    return try context.push {
+      try renderNodes(emptyNodes, context)
+    }
+  }
+
+  private func push<Result>(value: Any, context: Context, closure: () throws -> (Result)) throws -> Result {
     if loopVariables.isEmpty {
-      return try context.push() {
-        return try closure()
+      return try context.push {
+        try closure()
       }
     }
 
@@ -66,29 +123,28 @@ class ForNode : NodeType {
         throw TemplateSyntaxError("Tuple '\(value)' has less values than loop variables")
       }
       var variablesContext = [String: Any]()
-      valueMirror.children.prefix(loopVariables.count).enumerated().forEach({ (offset, element) in
+      valueMirror.children.prefix(loopVariables.count).enumerated().forEach { offset, element in
         if loopVariables[offset] != "_" {
           variablesContext[loopVariables[offset]] = element.value
         }
-      })
+      }
 
       return try context.push(dictionary: variablesContext) {
-        return try closure()
+        try closure()
       }
     }
 
-    return try context.push(dictionary: [loopVariables.first!: value]) {
-      return try closure()
+    return try context.push(dictionary: [loopVariables.first ?? "": value]) {
+      try closure()
     }
   }
 
-  func render(_ context: Context) throws -> String {
+  private func resolve(_ context: Context) throws -> [Any] {
     let resolved = try resolvable.resolve(context)
 
     var values: [Any]
-
     if let dictionary = resolved as? [String: Any], !dictionary.isEmpty {
-      values = dictionary.map { ($0.key, $0.value) }
+      values = dictionary.sorted { $0.key < $1.key }
     } else if let array = resolved as? [Any] {
       values = array
     } else if let range = resolved as? CountableClosedRange<Int> {
@@ -115,35 +171,6 @@ class ForNode : NodeType {
       values = []
     }
 
-    if let `where` = self.where {
-      values = try values.filter({ item -> Bool in
-        return try push(value: item, context: context) {
-          try `where`.evaluate(context: context)
-        }
-      })
-    }
-
-    if !values.isEmpty {
-      let count = values.count
-
-      return try values.enumerated().map { index, item in
-        let forContext: [String: Any] = [
-          "first": index == 0,
-          "last": index == (count - 1),
-          "counter": index + 1,
-          "counter0": index,
-        ]
-
-        return try context.push(dictionary: ["forloop": forContext]) {
-          return try push(value: item, context: context) {
-            try renderNodes(nodes, context)
-          }
-        }
-      }.joined(separator: "")
-    }
-
-    return try context.push {
-      try renderNodes(emptyNodes, context)
-    }
+    return values
   }
 }

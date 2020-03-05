@@ -20,10 +20,10 @@ following lookup:
 
 - Context lookup
 - Dictionary lookup
-- Array lookup (first, last, count, index)
+- Array and string lookup (first, last, count, by index)
 - RenderKeyed protocol lookup
-- Key value coding lookup (macos only)
-- Type introspection
+- Key value coding lookup
+- Type introspection (via ``Mirror``)
 
 For example, if `people` was an array:
 
@@ -37,6 +37,24 @@ value for a String key, much like key value coding, but it works on
 all operating systems and allows you to decouple the names used in
 the templates from the Swift implementation. The RenderKeyed protocol
 requires a single function: `: value(forRenderKey:String)->Any?`
+
+You can also use the subscript operator for indirect evaluation. The expression
+between brackets will be evaluated first, before the actual lookup will happen.
+
+For example, if you have the following context:
+
+.. code-block:: swift
+
+    [
+      "item": [
+        "name": "John"
+      ],
+      "key": "name"
+    ]
+
+.. code-block:: html+django
+
+    The result of {{ item[key] }} will be the same as {{ item.name }}. It will first evaluate the result of {{ key }}, and only then evaluate the lookup expression.
 
 Filters
 ~~~~~~~
